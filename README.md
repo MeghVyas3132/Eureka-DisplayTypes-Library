@@ -12,14 +12,46 @@ stores, so a made-up detail is a compliance bug:
 | Badge | Meaning |
 |---|---|
 | 🟢 **Real pixels** | The visible surface is a crop or warp of the photo itself (fold faces, face-out, flat lay, shelves). |
-| 🔵 **Inferred surface** | The photo never saw this surface (spine/side, roll ends, a bag's gusset, the second shoe). It is rebuilt from the product's real fabric swatch and colour. |
+| 🔵 **Inferred surface** | The photo never saw this surface (roll ends, a bag's gusset, the second shoe). It is rebuilt from the product's real fabric swatch and colour. |
 | 🟠 **Needs another photo** | The visible surface is what identifies the product but isn't in a front photo (jeans back-pocket fold, back-print fold, heel-out). Add a back photo and it turns green. |
 
-![Kurta, yoke fold: real neckline embroidery at fold-board size](docs/screenshots/kurta-yoke-fold.png)
+| Yoke fold: the real kurta wrapped over a soft 3D fold | Side / spine hung: real garments, perpendicular to the wall, in perspective |
+|---|---|
+| ![Kurta, yoke fold](docs/screenshots/kurta-yoke-fold.png) | ![Kurta spine rail](docs/screenshots/kurta-spine-rail.png) |
 
 | Tee: all 12 views | Jeans: all 9 views |
 |---|---|
 | ![](docs/screenshots/tee-all-views.png) | ![](docs/screenshots/jeans-all-views.png) |
+
+## Folds, spines and drapes are real 3D, built from the photo
+
+A flat crop warped into a parallelogram doesn't look like a folded garment, and
+a strip of tiled fabric doesn't look like a side-hung rail. Those displays are
+rendered in three.js (PBR fabric with sheen, soft shadows, ambient occlusion,
+neutral tone mapping so product colours stay true). In every case the photo is
+**wrapped**, never repainted:
+
+- **Folds** (board, print, collar, yoke, box, wall, front, back-pocket, scarf,
+  towel; also table stacks and cubbies): each piece is one continuous surface. Its
+  flat top is the crop at fold-board size, and its border rolls down round a
+  half-cylinder of radius t/2 on every side. Surface coordinates are unrolled
+  centimetres, so the rounded front fold shows the photo pixels *just below* the
+  crop and the side folds show the pixels *just beside* it, the same fabric that
+  continues round a real fold. Above the shoulder line the garment's own outline
+  cuts the back corners, which gives the shoulder slope seen on every folded tee.
+  Stacks get small natural offsets and contact occlusion between layers.
+- **Side / spine hung** (tops and clip-hung bottoms): each garment is a thin
+  lens-shaped shell carrying the real cut-out, hung perpendicular to the wall on a
+  modelled hanger hooked over the rail and seen in perspective. Each spine is a
+  compressed sliver of the real sleeve, side seam, borders and hem band, at their
+  true heights. The garment's back is never in a front photo, so it is the real
+  fabric inside the real outline (or the back photo, if added), never a mirrored print.
+- **Drapes** (trousers folded over a hanger, scarf/dupatta on a bar or hanger,
+  towel on a rail): a strip of the real textile laid over a modelled bar, with soft folds.
+- **Rolls** are 3D cylinders with spiral ends (inferred, from the fabric swatch).
+
+Perspective renders don't show the 10 cm scale bar. Their true sizes are in the
+caption (fold size, stack height, rail length).
 
 ## Run it
 
@@ -74,7 +106,8 @@ photo ──cutout()──▶ cut-out + mask ──analyse()──▶ landmarks,
 |---|---|
 | `src/image.ts` | Background removal for catalogue shots: the backdrop colour is estimated from the border, everything connected to the border is flood-filled out, large enclosed backdrop holes (bag handles) are removed, and the edge is feathered. `analyse()` finds the shoulder line, torso, leg split, hang point, dominant colour, a representative fabric swatch and the densest print/embroidery window. |
 | `src/draw.ts` | Primitives in cm: a mesh warp (photo → any quad), seamless fabric patterns at true scale, drape and cylinder shading, and fixtures (rails, hangers, clip hangers, shelves, tables, arms, peg hooks, dress/head forms, risers, boxes). |
-| `src/displays.ts` | 13 categories, 46 display scenes. Each scene reports its provenance and a one-line explanation. Folds crop the photo at the standard fold size and lay it over the fabric swatch so tucked edges read as fabric. |
+| `src/displays.ts` | 13 categories, 46 display scenes. Each scene reports its provenance and a one-line explanation. `planFold()` picks the photo crop at the standard fold size for each fold type. |
+| `src/three3d.ts` | Shared offscreen three.js renderer with cached output. Contains the wrapped fold geometry, garment shells and hangers for spine rails, drape-over-bar strips, rolls, shelves, tables and cubbies. |
 | `src/samples.ts` | Samples: real Eureka/Nayasa catalogue photos plus procedurally drawn studio shots (tee, jeans, sneaker, tote, cap, towel). These go through the same pipeline as uploads. |
 | `src/app.ts` | UI: upload, product list, one-click display buttons, all-views grid, back photo, cut-out tolerance, optional AI cut-out, PNG export. |
 

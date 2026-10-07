@@ -3,7 +3,9 @@
 //   exact   – the visible surface is real pixels from the photo (cropped / warped)
 //   inferred – a surface the photo never saw, rebuilt from the real fabric swatch
 //   needs   – the visible surface defines the product but isn't in the photo
+import * as THREE from "three";
 import { mk, ctx2d, rgb, type Analysis, type Box, type Canvas } from "./image.ts";
+import { render3D, shelfFolds, tableFolds, cubbyFolds, rolls, spineRail, drapeOverBar, type Fit, type FoldSpec, type HangSpec, type DrapeSpec } from "./three3d.ts";
 import {
   type C2D, type Pt, dep, drawQuad, blit, fabric, grad, CYL, FOLD_EDGE, drape, shadow, noShadow, poly,
   contactShadow, rail, hanger, hangerEdge, clipHanger, shelf, wallPanel, tableTop, arm, pegHook, dressForm,
@@ -23,7 +25,7 @@ export interface Product extends View {
 }
 
 export interface Opts { count: number }
-export interface Scene { w: number; h: number; prov: Prov; note: string; dims: string; paint: (ctx: C2D) => void }
+export interface Scene { w: number; h: number; prov: Prov; note: string; dims: string; paint: (ctx: C2D) => void; persp?: boolean }
 
 export type CatId = "tee" | "shirt" | "sweater" | "dress" | "set" | "bottoms" | "outerwear" | "footwear" | "bag" | "cap" | "scarf" | "towel" | "packaged";
 
@@ -125,32 +127,6 @@ function mirror(c: Canvas): Canvas {
   return m;
 }
 
-/**
- * The visible top face of a folded item: a crop of the photo at true size,
- * laid over the fabric swatch so tucked-in edges read as fabric, not holes.
- */
-function foldFace(v: View, box: Box, ppcSwatch: number): Canvas {
-  const fw = Math.max(4, Math.round(box.w)), fh = Math.max(4, Math.round(box.h));
-  const c = mk(fw, fh);
-  const x = ctx2d(c);
-  x.fillStyle = fabric(x, v.an.patch, 1);
-  x.fillRect(0, 0, fw, fh);
-  // intersect the crop with the image
-  const sx0 = Math.max(0, box.x), sy0 = Math.max(0, box.y);
-  const sx1 = Math.min(v.cut.width, box.x + box.w), sy1 = Math.min(v.cut.height, box.y + box.h);
-  if (sx1 > sx0 && sy1 > sy0) {
-    const k = fw / box.w;
-    x.drawImage(v.cut, sx0, sy0, sx1 - sx0, sy1 - sy0, (sx0 - box.x) * k, (sy0 - box.y) * k, (sx1 - sx0) * k, (sy1 - sy0) * k);
-  }
-  // tucked side edges + soft fold at the front
-  x.fillStyle = grad(x, 0, 0, fw, 0, [[0, "rgba(0,0,0,.20)"], [0.05, "rgba(0,0,0,0)"], [0.95, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,.22)"]]);
-  x.fillRect(0, 0, fw, fh);
-  x.fillStyle = grad(x, 0, 0, 0, fh, [[0, "rgba(0,0,0,.05)"], [0.85, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,.18)"]]);
-  x.fillRect(0, 0, fw, fh);
-  void ppcSwatch;
-  return c;
-}
-
 function placeholderFace(v: View, w: number, h: number, text: string): Canvas {
   const c = mk(w, h);
   const x = ctx2d(c);
@@ -165,7 +141,7 @@ function placeholderFace(v: View, w: number, h: number, text: string): Canvas {
   return c;
 }
 
-interface FoldPlan { face: Canvas; w: number; d: number; t: number; prov: Prov; note: string }
+interface FoldPlan { spec: FoldSpec; prov: Prov; note: string }
 
 function planFold(p: Product, kind: FoldKind): FoldPlan {
   const g = geo(p), c = CAT[p.cat], an = p.an;
@@ -174,90 +150,79 @@ function planFold(p: Product, kind: FoldKind): FoldPlan {
   const centreX = (an.torso[0] + an.torso[1]) / 2;
   let v: View = p;
   let box: Box;
-  let prov: Prov = "exact";
-  let note = "Top face = real pixels cropped at the store-standard fold size. Folded edges are built from the real fabric.";
+  let maskBack = true;
+  let note = "The photo is wrapped over a folded piece at the store-standard fold size: the top face is the real crop, and the rounded folds continue into the neighbouring real pixels.";
+  const placeholder = (text: string, why: string): FoldPlan => {
+    const src = placeholderFace(p, Math.round(w * 10), Math.round(d * 10), text);
+    return { spec: { w, d, t, wrap: { src, box: { x: 0, y: 0, w: src.width, h: src.height }, patch: p.an.patch, color: p.an.color, shoulderY: 0, maskBack: false } }, prov: "needs", note: why };
+  };
   switch (kind) {
     case "print": {
       const pb = an.printBox;
       const cy = pb ? pb.y + pb.h / 2 : an.shoulderY + (d * ppc) / 2;
       const cxp = pb ? pb.x + pb.w / 2 : centreX;
       box = { x: cxp - (w * ppc) / 2, y: Math.max(0, cy - (d * ppc) / 2), w: w * ppc, h: d * ppc };
-      note = pb ? "Print fold: the crop is centred on the detected graphic / embroidery. Real pixels." : "No distinct print found, so this falls back to a neckline fold. Real pixels.";
+      maskBack = box.y < an.shoulderY;
+      note = pb ? "Print fold: folded so the detected graphic / embroidery sits centred on top. Real pixels, wrapped over the fold." : "No distinct print found, so this falls back to a neckline fold. Real pixels.";
       break;
     }
     case "wall":
-      d = d / 2; t = t * 2;
+      d = d / 2; t = t * 1.8;
       box = { x: centreX - (w * ppc) / 2, y: 0, w: w * ppc, h: d * ppc };
-      note = "Double fold for wall shelves: half the depth, twice the thickness. The top face is real pixels.";
+      note = "Double fold for wall shelves: half the depth, nearly twice the thickness. Real pixels, wrapped over the fold.";
       break;
     case "front": case "pocket": {
       const top = an.rows.find((r) => r[0] >= 0) ?? Int32Array.of(0, p.cut.width);
       const half = (an.cx - top[0]) / ppc;
-      w = Math.min(32, Math.max(18, half));
+      w = Math.min(32, Math.max(24, half * 1.3)); // leg-over-leg: one leg plus the seat
+      maskBack = false;
       if (kind === "pocket") {
-        if (p.back) { v = p.back; note = "Back-pocket fold, using the back photo. Real pixels."; }
-        else return { face: placeholderFace(p, Math.round(w * 10), Math.round(d * 10), "Back photo needed"), w, d, t, prov: "needs",
-          note: "Denim is folded with the back pockets showing, and they aren't in a front photo. Upload a back photo and this becomes real pixels." };
+        if (p.back) { v = p.back; note = "Back-pocket fold from the back photo. Real pixels, wrapped over the fold."; }
+        else return placeholder("Back photo needed", "Denim is folded with the back pockets showing, and they aren't in a front photo. Upload a back photo and this becomes real pixels.");
       }
       const vr = v.an.rows.find((r) => r[0] >= 0) ?? Int32Array.of(0, v.cut.width);
       box = { x: vr[0], y: 0, w: w * ppc, h: d * ppc };
-      if (kind === "front") note = "Leg-over-leg fold, front facing: waistband, front pocket and fly are real pixels.";
+      if (kind === "front") note = "Leg-over-leg fold, front facing: waistband, front pocket and fly are real pixels; the folded leg wraps round the front edge.";
       break;
     }
     case "back":
-      if (!p.back) return { face: placeholderFace(p, Math.round(w * 10), Math.round(d * 10), "Back photo needed"), w, d, t, prov: "needs",
-        note: "Back-print fold shows the garment's back, which a front photo never sees. Upload a back photo to fix this." };
+      if (!p.back) return placeholder("Back photo needed", "Back-print fold shows the garment's back, which a front photo never sees. Upload a back photo to fix this.");
       v = p.back;
       box = { x: (v.an.torso[0] + v.an.torso[1]) / 2 - (w * ppc) / 2, y: 0, w: w * ppc, h: d * ppc };
-      note = "Back-print fold from the back photo. Real pixels.";
+      note = "Back-print fold from the back photo. Real pixels, wrapped over the fold.";
       break;
     case "scarf": case "towel":
+      maskBack = false;
       // towels fold so the woven end band faces up; scarves show their centre panel
       box = kind === "towel"
-        ? { x: p.cut.width / 2 - (w * ppc) / 2, y: p.cut.height - d * ppc, w: w * ppc, h: d * ppc }
+        ? { x: p.cut.width / 2 - (w * ppc) / 2, y: p.cut.height - d * ppc - 2 * ppc, w: w * ppc, h: d * ppc }
         : { x: p.cut.width / 2 - (w * ppc) / 2, y: p.cut.height / 2 - (d * ppc) / 2, w: w * ppc, h: d * ppc };
-      note = "Folded to the standard size; the face is the real centre panel of the photo.";
+      note = kind === "towel" ? "Folded with the woven end band on top, as stores do. Real pixels, wrapped over the fold." : "Folded to the standard size; the face is the real centre panel. Real pixels, wrapped over the fold.";
       break;
     default:
       // board / collar / yoke / box: neckline at the back edge, chest towards the customer
       box = { x: centreX - (w * ppc) / 2, y: 0, w: w * ppc, h: d * ppc };
-      if (kind === "collar") note = "Collar fold: collar, placket and chest are real pixels at fold-board size.";
-      if (kind === "yoke") note = "Yoke fold: neckline and yoke embroidery are real pixels. A dupatta, if any, is folded underneath.";
-      if (kind === "box") note = "Box fold for bulky knits: thicker folds; the front is real pixels.";
+      if (kind === "collar") note = "Collar fold: collar, placket and chest are real pixels at fold-board size; the shoulder slope shapes the back corners.";
+      if (kind === "yoke") note = "Yoke fold: neckline and yoke embroidery are real pixels; the fold continues into the real kurta below the yoke. A dupatta, if any, is folded underneath.";
+      if (kind === "box") note = "Box fold for bulky knits: thicker, rounder folds. Real pixels, wrapped over the fold.";
+      if (kind === "board") note = "Board fold (12\" × 12.5\"): neckline and chest are real pixels; shoulder slope shapes the back corners and the front fold continues into the real hem area.";
   }
-  return { face: foldFace(v, box, ppc), w, d, t, prov, note };
+  return { spec: { w, d, t, wrap: { src: v.cut, box, patch: v.an.patch, color: v.an.color, shoulderY: v.an.shoulderY + 0.02 * v.cut.height, maskBack } }, prov: "exact", note };
 }
 
-/** A stack of folded items sitting on a surface whose front edge is at y = baseY. */
-function foldStack(ctx: C2D, p: Product, f: FoldPlan, x: number, baseY: number, count: number) {
-  const ppc = ppcOf(p);
-  const [dx, dy] = dep(f.d);
-  const pat = fabric(ctx, p.an.patch, ppc);
-  contactShadow(ctx, x + f.w / 2 + dx / 2, baseY + dy / 2, f.w + dx + 6, 3);
-  // solid body behind the stack so no seam between faces can show the wall through
-  const topY = baseY - count * f.t;
-  poly(ctx, [[x, baseY], [x + f.w, baseY], [x + f.w + dx, baseY + dy], [x + f.w + dx, topY + dy], [x + dx, topY + dy], [x, topY]]);
-  ctx.fillStyle = rgb(p.an.color, 0.55); ctx.fill();
-  for (let k = 0; k < count; k++) {
-    const jx = ((k * 37) % 5 - 2) * 0.12;
-    const y = baseY - k * f.t;
-    const x0 = x + jx;
-    // front fold edge
-    ctx.fillStyle = pat; ctx.beginPath(); ctx.roundRect(x0, y - f.t, f.w, f.t, f.t * 0.35); ctx.fill();
-    ctx.fillStyle = grad(ctx, 0, y - f.t, 0, y, FOLD_EDGE); ctx.fill();
-    // right side
-    poly(ctx, [[x0 + f.w, y - f.t], [x0 + f.w + dx, y - f.t + dy], [x0 + f.w + dx, y + dy], [x0 + f.w, y]]);
-    ctx.fillStyle = pat; ctx.fill(); ctx.fillStyle = "rgba(0,0,0,.30)"; ctx.fill();
-    if (k === count - 1) {
-      const ty = y - f.t;
-      // under-fill so no background seam shows between the warped face and the sides
-      poly(ctx, [[x0 + dx, ty + dy], [x0 + f.w + dx, ty + dy], [x0 + f.w, ty], [x0, ty]]);
-      ctx.fillStyle = rgb(p.an.color, 0.8); ctx.strokeStyle = ctx.fillStyle; ctx.lineWidth = 0.35; ctx.fill(); ctx.stroke();
-      drawQuad(ctx, f.face, { x: 0, y: 0, w: f.face.width, h: f.face.height }, [[x0 + dx, ty + dy], [x0 + f.w + dx, ty + dy], [x0 + f.w, ty], [x0, ty]]);
-    }
-    ctx.strokeStyle = "rgba(0,0,0,.18)"; ctx.lineWidth = 0.08;
-    ctx.beginPath(); ctx.moveTo(x0 + 0.3, y); ctx.lineTo(x0 + f.w - 0.3, y); ctx.stroke();
-  }
+// ── 3D scene glue ───────────────────────────────────────────────────────────
+const canvasIds = new WeakMap<Canvas, number>();
+let nextId = 1;
+const cid = (c: Canvas) => { let i = canvasIds.get(c); if (!i) { i = nextId++; canvasIds.set(c, i); } return i; };
+const pkey = (p: Product, extra: string) => `${p.id}|${cid(p.cut)}|${p.back ? cid(p.back.cut) : 0}|${p.sizeCm}|${p.cat}|${extra}`;
+function scene3d(key: string, w: number, h: number, build: (root: THREE.Group) => Fit): Pick<Scene, "w" | "h" | "paint" | "persp"> {
+  return {
+    w, h, persp: true,
+    paint: (ctx) => {
+      const t = ctx.getTransform(), s = Math.hypot(t.a, t.b);
+      ctx.drawImage(render3D(key, w * s, h * s, build), 0, 0, w, h);
+    },
+  };
 }
 
 // ── Hanging helpers ──────────────────────────────────────────────────────────
@@ -269,27 +234,6 @@ function hungGarment(ctx: C2D, p: Product, cx: number, barY: number, opts: { dim
   ctx.drawImage(img, cx - g.cx, top, g.W, g.L);
   noShadow(ctx);
   return { top, bottom: top + g.L };
-}
-
-function spineStrip(ctx: C2D, p: Product, x: number, top: number, t: number, len: number, flare = 1.18, clip = false) {
-  const ppc = ppcOf(p);
-  const b = top + len;
-  const shape = () => {
-    ctx.beginPath();
-    if (clip) {
-      ctx.moveTo(x, top); ctx.lineTo(x + t, top);
-    } else {
-      ctx.moveTo(x, top + 3);
-      ctx.quadraticCurveTo(x + t * 0.05, top, x + t / 2, top - 0.2);
-      ctx.quadraticCurveTo(x + t * 0.95, top, x + t, top + 3);
-    }
-    ctx.lineTo(x + t + (t * (flare - 1)) / 2, b - 0.6);
-    ctx.quadraticCurveTo(x + t / 2, b + 0.8, x - (t * (flare - 1)) / 2, b - 0.6);
-    ctx.closePath();
-  };
-  shape(); ctx.fillStyle = fabric(ctx, p.an.patch, ppc, 90); ctx.fill();
-  shape(); ctx.fillStyle = grad(ctx, x - 0.5, 0, x + t + 0.5, 0, CYL); ctx.fill();
-  shape(); ctx.strokeStyle = "rgba(0,0,0,.25)"; ctx.lineWidth = 0.1; ctx.stroke();
 }
 
 // ── Scenes ───────────────────────────────────────────────────────────────────
@@ -312,24 +256,21 @@ def("face_out", "Face-out (front hung)", "Hanging", (p) => {
     } };
 });
 
-def("spine_out", "Side / spine hung", "Hanging", (p, o) => {
-  const g = geo(p), t = CAT[p.cat].thick, n = Math.max(1, o.count + 2);
-  const len = g.L * 0.97, gap = t * 0.92;
-  const w = n * gap + 30, barY = 14, h = barY + len + 12;
-  return { w, h, prov: "inferred", dims: `${n} facings × ${f1(t)} cm = ${f1(n * gap)} cm of rail · drop ${f1(len)} cm`,
-    note: "The side of a hung garment is never in a front photo. Each spine is the real fabric swatch (tiled) on a sleeve-and-shoulder profile, with cylinder shading. At rail scale this reads as the real thing.",
-    paint: (ctx) => {
-      wallPanel(ctx, 0, 0, w, h);
-      rail(ctx, 6, w - 6, barY - 6);
-      for (let k = 0; k < n; k++) {
-        const x = 15 + k * gap;
-        hangerEdge(ctx, x + t / 2, barY - 7.3, barY + 0.8);
-        shadow(ctx, 1.2, 0.4, 0.18);
-        spineStrip(ctx, p, x, barY + 1, t, len);
-        noShadow(ctx);
-      }
-    } };
+const hangSpec = (p: Product, clip: boolean): HangSpec => ({
+  cut: p.cut, ppc: ppcOf(p), thick: CAT[p.cat].thick, neckX: p.an.neckX, shoulderY: p.an.shoulderY, color: p.an.color,
+  patch: p.an.patch, back: p.back?.cut ?? null, clip,
 });
+const spineScene = (clip: boolean): Builder => (p, o) => {
+  const g = geo(p), t = CAT[p.cat].thick, n = Math.max(2, o.count + 3);
+  const gap = Math.max(t * 0.95, 2.6);
+  const w = Math.max(n * gap + 46, g.L * 0.62), h = g.L + 18;
+  return { ...scene3d(pkey(p, `spine${clip}|${n}`), w, h, (root) => spineRail(root, hangSpec(p, clip), n)),
+    prov: "exact", dims: `${n} facings × ${f1(gap)} cm = ${f1(n * gap)} cm of rail · drop ${f1(g.L)} cm`,
+    note: clip
+      ? "Bottoms clipped at the waistband and hung side-on: each one is the real cut-out on a thin draped shell, seen in perspective, so the outseam, pockets and hem are real pixels."
+      : "Each garment is the real cut-out on a thin draped shell, hung perpendicular to the wall and seen in perspective, so every spine is a compressed sliver of the real sleeve, side, borders and hem. Nothing is repainted." };
+};
+def("spine_out", "Side / spine hung", "Hanging", spineScene(false));
 
 def("waterfall", "Waterfall", "Hanging", (p, o) => {
   const g = geo(p), n = Math.min(5, Math.max(2, o.count));
@@ -349,17 +290,11 @@ def("waterfall", "Waterfall", "Hanging", (p, o) => {
     } };
 });
 
-const foldScene = (kind: FoldKind | "cat", label: string): Builder => (p, o) => {
-  const f = planFold(p, kind === "cat" ? CAT[p.cat].foldKind : kind);
-  const n = Math.max(1, o.count);
-  const [dx, dy] = dep(f.d + 6);
-  const sw = f.w + 14, w = sw + dx + 8, shelfY = n * f.t - dy + 10, h = shelfY + 8;
-  return { w, h, prov: f.prov, note: f.note, dims: `${label} ${dimsWH(f.w, f.d)} · stack of ${n} = ${f1(n * f.t)} cm`,
-    paint: (ctx) => {
-      shelf(ctx, 4, shelfY, sw, f.d + 6);
-      const [ix, iy] = dep(2.5);
-      foldStack(ctx, p, f, 4 + 7 + ix, shelfY + iy, n);
-    } };
+const foldScene = (kind: FoldKind, label: string): Builder => (p, o) => {
+  const f = planFold(p, kind), n = Math.max(1, o.count);
+  const w = f.spec.w + 30, h = w * 0.74;
+  return { ...scene3d(pkey(p, `fold|${kind}|${n}`), w, h, (root) => shelfFolds(root, f.spec, n)),
+    prov: f.prov, note: f.note, dims: `${label} ${dimsWH(f.spec.w, f.spec.d)} · stack of ${n} = ${f1(n * f.spec.t)} cm` };
 };
 
 def("fold_board", "Board fold", "Folded", foldScene("board", "Fold"));
@@ -376,81 +311,29 @@ def("fold_towel", "Towel stack", "Folded", foldScene("towel", "Fold"));
 
 def("table_stacks", "Table stacks", "Shelf & table", (p, o) => {
   const f = planFold(p, CAT[p.cat].foldKind);
-  const n = Math.max(1, o.count);
-  const counts = [n, n + 1, Math.max(1, n - 1)];
-  const gap = 5, depth = f.d + 14;
-  const [dx, dy] = dep(depth);
-  const tw = 3 * f.w + 4 * gap, w = tw + dx + 10, topY = (n + 1) * f.t - dy + 12;
-  const h = topY + 14;
-  return { w, h, prov: f.prov, note: "A feature table with three stacks. " + f.note, dims: `3 stacks · ${f1(tw)} cm of table`,
-    paint: (ctx) => {
-      shelf(ctx, 5, topY, tw, depth, 4);
-      ctx.fillStyle = "#a88c63"; ctx.fillRect(9, topY + 4, 2.5, h - topY - 4); ctx.fillRect(5 + tw - 6.5, topY + 4, 2.5, h - topY - 4);
-      const [ix, iy] = dep(5);
-      counts.forEach((c, i) => foldStack(ctx, p, f, 5 + gap + i * (f.w + gap) + ix, topY + iy, c));
-    } };
+  const n = Math.max(1, o.count), counts = [n, n + 1, Math.max(1, n - 1)];
+  const tw = 3 * f.spec.w + 24, w = tw + 20, h = w * 0.52;
+  return { ...scene3d(pkey(p, `table|${n}`), w, h, (root) => tableFolds(root, f.spec, counts)),
+    prov: f.prov, note: "A feature table with three stacks. " + f.note, dims: `3 stacks · ${f1(tw)} cm of table` };
 });
 
 def("cubby", "Cubby", "Shelf & table", (p, o) => {
   const f = planFold(p, CAT[p.cat].foldKind);
   const n = Math.max(1, o.count);
-  const cw = f.w + 6, chh = n * f.t + 10, cd = f.d + 4, wall = 1.8;
-  const [dx, dy] = dep(cd);
-  const w = cw + 2 * wall + dx + 8, h = chh + 2 * wall - dy + 8;
-  return { w, h, prov: f.prov, note: "A stack in a cube cell. " + f.note, dims: `cube ${dimsWH(cw, chh)} · ${n} pieces`,
-    paint: (ctx) => {
-      const x = 4, y = 4 - dy + wall;
-      const inner = { x: x + wall, y: y, w: cw, h: chh };
-      ctx.fillStyle = "#cdb48c";
-      ctx.fillRect(inner.x + dx, inner.y + dy, inner.w, inner.h);
-      poly(ctx, [[inner.x, inner.y], [inner.x + dx, inner.y + dy], [inner.x + dx, inner.y + inner.h + dy], [inner.x, inner.y + inner.h]]); ctx.fillStyle = "#bba077"; ctx.fill();
-      poly(ctx, [[inner.x, inner.y], [inner.x + inner.w, inner.y], [inner.x + inner.w + dx, inner.y + dy], [inner.x + dx, inner.y + dy]]); ctx.fillStyle = "#a88c63"; ctx.fill();
-      poly(ctx, [[inner.x, inner.y + inner.h], [inner.x + inner.w, inner.y + inner.h], [inner.x + inner.w + dx, inner.y + inner.h + dy], [inner.x + dx, inner.y + inner.h + dy]]); ctx.fillStyle = "#dcc6a2"; ctx.fill();
-      const [ix, iy] = dep(2);
-      foldStack(ctx, p, f, inner.x + 3 + ix, inner.y + inner.h + iy, n);
-      ctx.fillStyle = "#c4a77c";
-      ctx.fillRect(x, y - wall, cw + 2 * wall, wall); ctx.fillRect(x, y + chh, cw + 2 * wall, wall);
-      ctx.fillRect(x, y - wall, wall, chh + 2 * wall); ctx.fillRect(x + wall + cw, y - wall, wall, chh + 2 * wall);
-    } };
+  const cw = f.spec.w + 7, ch = n * f.spec.t + 9;
+  const w = cw + 26, h = Math.max(ch + 26, w * 0.7);
+  return { ...scene3d(pkey(p, `cubby|${n}`), w, h, (root) => cubbyFolds(root, f.spec, n)),
+    prov: f.prov, note: "A stack in a cube cell. " + f.note, dims: `cube ${dimsWH(cw, ch)} · ${n} pieces` };
 });
 
-const rollScene = (len: number, dia: number): Builder => (p) => {
-  const ppc = ppcOf(p), r = dia / 2;
-  const [dx, dy] = dep(len);
-  const cols = 3, rows = 2;
-  const w = cols * dia + dx + 16, shelfY = rows * dia * 0.9 - dy + 8, h = shelfY + 8;
-  return { w, h, prov: "inferred", dims: `rolls ${f1(len)} cm × Ø${f1(dia)} cm · ${cols * rows - 1} pieces`,
-    note: "Rolled: you only see the spiral end and the outer layer. Both are rebuilt from the real fabric swatch.",
-    paint: (ctx) => {
-      shelf(ctx, 3, shelfY, cols * dia + 10, len + 4);
-      const pat = fabric(ctx, p.an.patch, ppc);
-      const L = Math.hypot(dx, dy), vx = dx / L, vy = dy / L, nx = -vy, ny = vx;
-      const roll = (cx: number, cy: number) => {
-        // body: the capsule swept from the front circle back along the depth axis
-        const bx = cx + dx, by = cy + dy;
-        poly(ctx, [[cx + nx * r, cy + ny * r], [bx + nx * r, by + ny * r], [bx - nx * r, by - ny * r], [cx - nx * r, cy - ny * r]]);
-        ctx.fillStyle = pat; ctx.fill();
-        ctx.fillStyle = grad(ctx, cx + nx * r, cy + ny * r, cx - nx * r, cy - ny * r, CYL); ctx.fill();
-        ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI * 2); ctx.fillStyle = pat; ctx.fill();
-        ctx.fillStyle = "rgba(0,0,0,.18)"; ctx.fill();
-        // spiral end facing the customer
-        ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fillStyle = pat; ctx.fill();
-        const rg = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, r * 0.1, cx, cy, r);
-        rg.addColorStop(0, "rgba(255,255,255,.12)"); rg.addColorStop(1, "rgba(0,0,0,.22)");
-        ctx.fillStyle = rg; ctx.fill();
-        ctx.strokeStyle = "rgba(0,0,0,.30)"; ctx.lineWidth = 0.12;
-        ctx.beginPath();
-        for (let a = 0; a < Math.PI * 7; a += 0.2) { const rr = r * (0.08 + (a / (Math.PI * 7)) * 0.9); const px = cx + Math.cos(a) * rr, py = cy + Math.sin(a) * rr; a === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py); }
-        ctx.stroke();
-        ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.strokeStyle = "rgba(0,0,0,.25)"; ctx.lineWidth = 0.1; ctx.stroke();
-      };
-      const x0 = 3 + 5 + r, base = shelfY - r - 0.3;
-      for (let i = 0; i < cols; i++) roll(x0 + i * dia, base);
-      for (let i = 0; i < cols - 1; i++) roll(x0 + r + i * dia, base - dia * 0.86);
-    } };
+const rollScene = (len: number, dia: number, cubby: boolean): Builder => (p) => {
+  const w = 3 * dia + 30, h = w * 0.72;
+  return { ...scene3d(pkey(p, `roll|${len}|${dia}|${cubby}`), w, h, (root) => rolls(root, p.an.patch, p.an.color, len, dia, cubby)),
+    prov: "inferred", dims: `rolls ${f1(len)} cm × Ø${f1(dia)} cm · 5 pieces`,
+    note: "Rolled: only the spiral end and the outer layer show. Both are rebuilt from the real fabric swatch." };
 };
-def("rolled", "Rolled", "Folded", rollScene(28, 8));
-def("towel_roll", "Spa rolls", "Folded", rollScene(32, 12));
+def("rolled", "Rolled", "Folded", rollScene(28, 8, true));
+def("towel_roll", "Spa rolls", "Folded", rollScene(32, 12, false));
 
 def("flat_lay", "Flat lay (table)", "Shelf & table", (p) => {
   const g = geo(p);
@@ -505,47 +388,18 @@ def("clip_hang", "Clip hanger", "Hanging", (p) => {
     } };
 });
 
-def("spine_clip", "Side hung (clip)", "Hanging", (p, o) => {
-  const g = geo(p), t = CAT[p.cat].thick, n = Math.max(1, o.count + 2), gap = t * 0.95;
-  const len = g.L * 0.98;
-  const w = n * gap + 30, barY = 14, h = barY + len + 12;
-  return { w, h, prov: "inferred", dims: `${n} facings · ${f1(n * gap)} cm of rail`,
-    note: "Bottoms seen side-on on clip hangers: the outseam is rebuilt from the real fabric swatch.",
-    paint: (ctx) => {
-      wallPanel(ctx, 0, 0, w, h);
-      rail(ctx, 6, w - 6, barY - 6);
-      for (let k = 0; k < n; k++) {
-        const x = 15 + k * gap;
-        hangerEdge(ctx, x + t / 2, barY - 7.3, barY);
-        ctx.fillStyle = "#2b2f36"; ctx.fillRect(x - 0.3, barY, t + 0.6, 2.4);
-        spineStrip(ctx, p, x, barY + 2.2, t, len, 1.05, true);
-      }
-    } };
-});
+def("spine_clip", "Side hung (clip)", "Hanging", spineScene(true));
 
 def("over_bar", "Folded over hanger", "Hanging", (p) => {
   const g = geo(p), an = p.an, ppc = g.ppc;
   const split = an.legSplitY ?? Math.round(p.cut.height * 0.35);
   const row = an.rows[Math.min(an.rows.length - 1, split + 2)];
-  const legW = Math.max(8, (an.cx - Math.max(0, row[0])) / ppc);
-  const segPx = Math.round((p.cut.height - split) * 0.48);
-  const src: Box = { x: Math.max(0, row[0]), y: split, w: legW * ppc, h: segPx };
-  const segL = segPx / ppc;
-  const w = Math.max(legW + 40, 50), barY = 16, h = barY + segL + 12;
-  return { w, h, prov: "exact", dims: `leg ${f1(legW)} cm wide · ${f1(segL)} cm drop`,
-    note: "Folded leg-over-leg across the hanger bar. Both visible halves are real crops of the leg.",
-    paint: (ctx) => {
-      wallPanel(ctx, 0, 0, w, h);
-      arm(ctx, 4, barY - 7, w / 2 + 6, barY - 7);
-      hanger(ctx, w / 2, barY - 8, barY, legW * 0.7 + 3);
-      ctx.save(); ctx.globalAlpha = 1;
-      blit(ctx, dim(p.cut), src, w / 2 - legW / 2 + 2, barY + 1.6, legW, segL * 0.92);
-      shadow(ctx, 1.5, 0.6, 0.22);
-      blit(ctx, p.cut, src, w / 2 - legW / 2, barY + 1.2, legW, segL);
-      noShadow(ctx); ctx.restore();
-      ctx.fillStyle = fabric(ctx, p.an.patch, ppc); ctx.beginPath(); ctx.roundRect(w / 2 - legW / 2, barY - 0.6, legW, 2.4, 1.2); ctx.fill();
-      ctx.fillStyle = grad(ctx, 0, barY - 0.6, 0, barY + 1.8, FOLD_EDGE); ctx.fill();
-    } };
+  const legW = Math.max(14, (an.cx - Math.max(0, row[0])) / ppc * 1.25);
+  const len = (p.cut.height - split) / ppc;
+  const d: DrapeSpec = { src: p.cut, box: { x: Math.max(0, row[0]), y: split, w: legW * ppc, h: len * ppc }, w: legW, len, frontShare: 0.52, patch: an.patch, color: an.color };
+  return { ...scene3d(pkey(p, "overbar"), legW + 34, len * 0.55 + 22, (root) => drapeOverBar(root, d, "hanger")),
+    prov: "exact", dims: `legs ${f1(legW)} cm wide · ${f1(len / 2)} cm drop each side`,
+    note: "Legs folded together and laid over the hanger bar: both hanging halves are the real leg, from crotch to hem, draped over a real bar." };
 });
 
 def("leg_form", "Pant form", "Forms", (p) => {
@@ -728,29 +582,17 @@ def("cap_hook", "On peg", "Wall & peg", (p) => {
 });
 
 // ── Draped textiles ──────────────────────────────────────────────────────────
-const drapeScene = (withHanger: boolean, panelW: number, dropCm: number): Builder => (p) => {
+const drapeScene = (mode: "hanger" | "rod", panelW: number, dropCm: number): Builder => (p) => {
   const g = geo(p), ppc = g.ppc;
-  const pw = Math.min(panelW, g.W), drop = Math.min(dropCm, g.L * 0.5);
-  const src: Box = { x: (p.cut.width - pw * ppc) / 2, y: (p.cut.height - drop * 2 * ppc) / 2, w: pw * ppc, h: drop * ppc };
-  const src2: Box = { ...src, y: src.y + drop * ppc };
-  const w = pw + 36, barY = 18, h = barY + drop + 14;
-  return { w, h, prov: "exact", dims: `${f1(pw)} cm panel · ${f1(drop)} cm drop`,
-    note: "Folded over a bar: both hanging halves are real crops of the textile, with the fold drawn from the real fabric.",
-    paint: (ctx) => {
-      wallPanel(ctx, 0, 0, w, h);
-      if (withHanger) { arm(ctx, 4, barY - 7, w / 2 + 6, barY - 7); hanger(ctx, w / 2, barY - 8, barY - 1, pw * 0.5 + 2); }
-      else { ctx.fillStyle = "#9aa1aa"; ctx.fillRect(6, barY - 4, 2.5, 6); ctx.fillRect(w - 8.5, barY - 4, 2.5, 6); rail(ctx, 6, w - 6, barY - 1, 1.1); }
-      blit(ctx, dim(p.cut), src2, w / 2 - pw / 2 + 1.5, barY, pw, drop * 0.94);
-      shadow(ctx, 1.5, 0.6, 0.22);
-      blit(ctx, p.cut, src, w / 2 - pw / 2, barY + 0.4, pw, drop);
-      noShadow(ctx);
-      ctx.fillStyle = fabric(ctx, p.an.patch, ppc); ctx.beginPath(); ctx.roundRect(w / 2 - pw / 2, barY - 2.2, pw, 3, 1.5); ctx.fill();
-      ctx.fillStyle = grad(ctx, 0, barY - 2.2, 0, barY + 0.8, FOLD_EDGE); ctx.fill();
-    } };
+  const pw = Math.min(panelW, g.W), len = Math.min(dropCm * 2, g.L);
+  const d: DrapeSpec = { src: p.cut, box: { x: (p.cut.width - pw * ppc) / 2, y: (p.cut.height - len * ppc) / 2, w: pw * ppc, h: len * ppc }, w: pw, len, frontShare: 0.55, patch: p.an.patch, color: p.an.color };
+  return { ...scene3d(pkey(p, `drape|${mode}|${panelW}|${dropCm}`), pw + 36, len * 0.55 + 22, (root) => drapeOverBar(root, d, mode)),
+    prov: "exact", dims: `${f1(pw)} cm panel · ${f1(len * 0.55)} cm front drop`,
+    note: "Folded and laid over a bar: the strip is the real textile, draped over a real bar with soft folds, so borders and prints fall where they really would." };
 };
-def("scarf_bar", "Draped on bar", "Hanging", drapeScene(false, 26, 60));
-def("scarf_hanger", "On hanger", "Hanging", drapeScene(true, 22, 55));
-def("towel_bar", "On towel bar", "Hanging", drapeScene(false, 40, 45));
+def("scarf_bar", "Draped on bar", "Hanging", drapeScene("rod", 26, 60));
+def("scarf_hanger", "On hanger", "Hanging", drapeScene("hanger", 22, 55));
+def("towel_bar", "On towel bar", "Hanging", drapeScene("rod", 40, 45));
 
 // ── Packaged / hardgoods ─────────────────────────────────────────────────────
 def("pack_shelf", "Facings on shelf", "Shelf & table", (p, o) => {

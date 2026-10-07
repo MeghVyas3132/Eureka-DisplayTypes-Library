@@ -95,8 +95,8 @@ function paint(canvas: Canvas, cssW: number, cssH: number, scene: Scene, pad = 2
   ctx.imageSmoothingQuality = "high";
   scene.paint(ctx);
   ctx.restore();
-  if (scaleBar) {
-    // 10 cm scale bar
+  if (scaleBar && !scene.persp) {
+    // 10 cm scale bar (only for true-scale elevations, not perspective renders)
     const len = 10 * s, x = ox, y = oy + scene.h * s + 14;
     ctx.strokeStyle = "#9a948a"; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + len, y); ctx.moveTo(x, y - 4); ctx.lineTo(x, y + 4); ctx.moveTo(x + len, y - 4); ctx.lineTo(x + len, y + 4); ctx.stroke();
