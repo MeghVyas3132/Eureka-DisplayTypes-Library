@@ -1,0 +1,15 @@
+{
+  "name": "eureka-displaytypes-library",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Upload one product photo and see it in every retail display type (folded, hung, stacked, on forms, on shelves), with one click.",
+  "scripts": {
+    "build": "rm -rf dist && mkdir -p dist && cp index.html dist/ && cp -R public/. dist/ && esbuild src/app.ts --bundle --minify --format=iife --outfile=dist/app.js",
+    "dev": "mkdir -p dist && cp index.html dist/ && cp -R public/. dist/ && esbuild src/app.ts --bundle --format=iife --outfile=dist/app.js --servedir=dist --serve=8766",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}
